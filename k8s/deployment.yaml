@@ -10,6 +10,11 @@ spec:
   selector:
     matchLabels:
       app: openbb-chat-agent
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   template:
     metadata:
       labels:
@@ -17,51 +22,63 @@ spec:
     spec:
       imagePullSecrets:
         - name: ghcr-pull
+      initContainers:
+        - name: init-claude-home
+          image: busybox:1.35
+          command:
+            - sh
+            - -c
+            - mkdir -p /data/.claude-home/.claude && chmod 700 /data/.claude-home/.claude
+          volumeMounts:
+            - name: claude-home
+              mountPath: /data/.claude-home
       containers:
         - name: openbb-chat-agent
-          image: ghcr.io/blevinson/openbb-chat-agent:latest
-          imagePullPolicy: Always
+          image: ghcr.io/blevinson/openbb-chat-agent:v0.1.2
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
               name: http
           env:
+            - name: CLAUDE_HOME
+              value: /data/.claude-home
+            - name: CLAUDE_MODEL
+              value: "claude-sonnet-4-6"
+            - name: GRAPHITI_MCP_URL
+              value: "http://graphiti-mcp.qid.svc.cluster.local:8000/mcp"
+            - name: TRADEFARM_URL
+              value: "http://tradefarm-live-backend.tradefarm-live.svc.cluster.local:8000"
             - name: API_BEARER_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: openbb-chat-agent-secret
-                  key: api_bearer_token
-            # Azure Anthropic proxy — same as qid-intelligence; sk-proxy is the sentinel key
-            - name: ANTHROPIC_API_KEY
-              value: "sk-proxy"
-            - name: ANTHROPIC_BASE_URL
-              value: "http://azure-anthropic-proxy.cloudtorch.svc.cluster.local:4000/v1"
-            - name: LLM_MODEL
-              value: "claude-sonnet-4-6"
-            - name: GRAPHITI_BASE_URL
-              value: "http://graphiti-mcp.qid.svc.cluster.local:8000"
-            - name: GRAPHITI_GROUP_ID
-              value: "qid_intelligence"
-            - name: TRADEFARM_URL
-              value: "http://tradefarm-backend.tradefarm.svc.cluster.local:8000"
+                  name: openbb-chat-agent-auth
+                  key: API_BEARER_TOKEN
+            - name: OPENAI_API_KEY
+              value: "none"
           readinessProbe:
             httpGet:
-              path: /health
+              path: /
               port: 8000
-            initialDelaySeconds: 5
+            initialDelaySeconds: 20
             periodSeconds: 15
           livenessProbe:
-            httpGet:
-              path: /health
+            tcpSocket:
               port: 8000
-            initialDelaySeconds: 10
+            initialDelaySeconds: 60
             periodSeconds: 30
           resources:
             requests:
-              cpu: "50m"
-              memory: "128Mi"
+              cpu: "100m"
+              memory: "256Mi"
             limits:
-              cpu: "500m"
-              memory: "512Mi"
+              cpu: "2"
+              memory: "1Gi"
+          volumeMounts:
+            - name: claude-home
+              mountPath: /data/.claude-home
+      volumes:
+        - name: claude-home
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -79,7 +96,7 @@ spec:
       targetPort: 8000
   type: ClusterIP
 ---
-# Secret template — create manually before deploying:
-#   kubectl -n qid create secret generic openbb-chat-agent-secret \
-#     --from-literal=api_bearer_token=<choose-a-token>
-# Then register the same token in pro.openbb.co Workspace backend settings.
+# Secret — create before deploying:
+#   kubectl -n qid create secret generic openbb-chat-agent-auth \
+#     --from-literal=API_BEARER_TOKEN=<choose-a-strong-token>
+# Register the same token in pro.openbb.co Workspace → Custom Backends.
