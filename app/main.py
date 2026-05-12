@@ -16,12 +16,16 @@ import json
 import os
 from typing import AsyncGenerator, Optional
 
+import logging
+
 import anthropic
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+log = logging.getLogger("openbb_chat_agent")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -41,12 +45,18 @@ ANTHROPIC_BASE_URL = os.environ.get(
     "http://azure-anthropic-proxy.cloudtorch.svc.cluster.local:4000/v1",
 )
 LLM_MODEL = os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
-# Max graphiti episodes to fetch per request (cost vs. coverage tradeoff)
-MAX_EPISODES = int(os.environ.get("MAX_EPISODES", "200"))
+# Max episodes to fetch from graphiti per request (cost vs. coverage tradeoff)
+MAX_FETCH_EPISODES = int(os.environ.get("MAX_FETCH_EPISODES", "200"))
+# Max episodes to include in the LLM context window (subset of fetched)
+MAX_CONTEXT_EPISODES = int(os.environ.get("MAX_CONTEXT_EPISODES", "60"))
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="QID OpenBB Chat Agent", version="1.0.0")
+
+if not API_BEARER_TOKEN:
+    log.warning("API_BEARER_TOKEN is not set — endpoint is OPEN. Set the k8s secret before exposing publicly.")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://pro.openbb.co", "http://localhost:*"],
@@ -125,7 +135,7 @@ async def _fetch_crucix_episodes() -> list[dict]:
         try:
             resp = await client.get(
                 f"{GRAPHITI_BASE_URL}/v1/episodes",
-                params={"group_id": GRAPHITI_GROUP_ID, "last_n": MAX_EPISODES},
+                params={"group_id": GRAPHITI_GROUP_ID, "last_n": MAX_FETCH_EPISODES},
                 headers={"Accept": "application/json"},
             )
             resp.raise_for_status()
@@ -200,7 +210,7 @@ async def _stream(user_message: str) -> AsyncGenerator[str, None]:
         episodes = await _fetch_crucix_episodes()
         if episodes:
             lines: list[str] = []
-            for ep in episodes[:60]:
+            for ep in episodes[:MAX_CONTEXT_EPISODES]:
                 name = ep.get("name", "?")
                 content = str(ep.get("content", ep.get("source_description", "")))
                 created = str(ep.get("created_at", ep.get("valid_at", "")))[:10]
